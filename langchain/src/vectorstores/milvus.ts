@@ -15,6 +15,7 @@ import { Document } from "../document.js";
 
 export interface MilvusLibArgs {
   collectionName?: string;
+  partitionName?: string;
   primaryField?: string;
   vectorField?: string;
   textField?: string;
@@ -47,9 +48,12 @@ const MILVUS_PRIMARY_FIELD_NAME = "langchain_primaryid";
 const MILVUS_VECTOR_FIELD_NAME = "langchain_vector";
 const MILVUS_TEXT_FIELD_NAME = "langchain_text";
 const MILVUS_COLLECTION_NAME_PREFIX = "langchain_col";
+const MILVUS_PARTITION_NAME_PREFIX = "langchain_part";
 
 export class Milvus extends VectorStore {
   collectionName: string;
+
+  partitionName: string;
 
   numDimensions?: number;
 
@@ -66,6 +70,8 @@ export class Milvus extends VectorStore {
   client: MilvusClient;
 
   colMgr: MilvusClient["collectionManager"];
+
+  partMgr: MilvusClient["partitionManager"];
 
   idxMgr: MilvusClient["indexManager"];
 
@@ -95,6 +101,7 @@ export class Milvus extends VectorStore {
     super(embeddings, args);
     this.embeddings = embeddings;
     this.collectionName = args.collectionName ?? genCollectionName();
+    this.partitionName = args.partitionName ?? getPartitionName();
     this.textField = args.textField ?? MILVUS_TEXT_FIELD_NAME;
 
     this.autoId = true;
@@ -199,13 +206,27 @@ export class Milvus extends VectorStore {
       );
     }
 
+    const hasPartResp = await this.partMgr.hasPartition({
+      collection_name: this.collectionName,
+      partition_name: this.partitionName
+    });
+    if (hasPartResp.status.error_code !== ErrorCode.SUCCESS) {
+      throw new Error(`Error checking partition: ${hasPartResp}`);
+    }
+    if (hasPartResp.value === false) {
+      throw new Error(
+        `Partition not found: ${this.partitionName}, please create partition before search.`
+      );
+    }
+
     await this.grabCollectionFields();
 
-    const loadResp = await this.colMgr.loadCollectionSync({
+    const loadResp = await this.partMgr.loadPartitions({
       collection_name: this.collectionName,
+      partition_names: [this.partitionName]
     });
     if (loadResp.error_code !== ErrorCode.SUCCESS) {
-      throw new Error(`Error loading collection: ${loadResp}`);
+      throw new Error(`Error loading partition: ${loadResp}`);
     }
 
     // clone this.field and remove vectorField
@@ -215,6 +236,7 @@ export class Milvus extends VectorStore {
 
     const searchResp = await this.dataMgr.search({
       collection_name: this.collectionName,
+      partition_names: [this.partitionName],
       search_params: {
         anns_field: this.vectorField,
         topk: k.toString(),
@@ -488,6 +510,10 @@ function createFieldTypeForMetadata(documents: Document[]): FieldType[] {
 
 function genCollectionName(): string {
   return `${MILVUS_COLLECTION_NAME_PREFIX}_${uuid.v4().replaceAll("-", "")}`;
+}
+
+function getPartitionName(): string {
+  return `${MILVUS_PARTITION_NAME_PREFIX}_${uuid.v4().replaceAll("-", "")}`;
 }
 
 function getTextFieldMaxLength(documents: Document[]) {
